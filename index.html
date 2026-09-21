@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Zartoque Twitch Clips — OBS Overlay</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { width:100%; height:100%; margin:0; overflow:hidden; background:#000; font-family:Inter,Segoe UI,Arial,sans-serif; }
+    #stage { position:fixed; inset:0; background:#000; }
+    #bg { position:absolute; inset:-4%; width:108%; height:108%; object-fit:cover; filter:blur(34px) brightness(.30) saturate(1.15); transform:scale(1.05); opacity:0; transition:opacity .45s ease; }
+    #shade { position:absolute; inset:0; background:radial-gradient(circle at 50% 42%, rgba(0,0,0,.05), rgba(0,0,0,.66) 78%); }
+    #playerWrap { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; padding:0; }
+    #clipFrame { width:100vw; height:100vh; border:0; background:#000; opacity:0; transition:opacity .35s ease; }
+    #clipFrame.ready { opacity:1; }
+
+    #info { position:absolute; left:34px; bottom:30px; max-width:min(980px,72vw); padding:13px 17px 12px; border-radius:14px; background:rgba(8,8,12,.62); backdrop-filter:blur(12px); box-shadow:0 8px 30px rgba(0,0,0,.3); opacity:0; transform:translateY(8px); transition:.28s ease; pointer-events:none; }
+    #info.show { opacity:1; transform:translateY(0); }
+    #title { font-size:22px; line-height:1.18; font-weight:700; text-shadow:0 2px 10px #000; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    #meta { margin-top:6px; font-size:14px; opacity:.82; display:flex; gap:12px; flex-wrap:wrap; }
+
+    #progress { position:absolute; left:0; right:0; bottom:0; height:5px; background:rgba(255,255,255,.12); }
+    #bar { height:100%; width:0%; background:#fff; box-shadow:0 0 18px rgba(255,255,255,.65); transition:width .15s linear; }
+
+    #status { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; padding:40px; color:#fff; background:#050507; z-index:20; transition:opacity .35s ease; }
+    #status.hidden { opacity:0; pointer-events:none; }
+    #statusCard { max-width:820px; padding:30px 34px; border-radius:20px; background:rgba(255,255,255,.055); border:1px solid rgba(255,255,255,.1); box-shadow:0 20px 70px rgba(0,0,0,.35); }
+    #statusTitle { font-size:30px; font-weight:800; }
+    #statusText { margin-top:12px; font-size:17px; line-height:1.5; opacity:.8; }
+
+    #controls { position:absolute; right:18px; top:18px; z-index:30; display:flex; gap:9px; opacity:0; transition:opacity .2s ease; }
+    body:hover #controls, #controls:focus-within { opacity:1; }
+    .btn { appearance:none; border:1px solid rgba(255,255,255,.18); border-radius:12px; padding:10px 14px; background:rgba(10,10,14,.72); color:#fff; font-weight:700; font-size:13px; cursor:pointer; backdrop-filter:blur(10px); }
+    .btn:hover { background:rgba(35,35,44,.88); }
+    .btn:disabled { opacity:.45; cursor:default; }
+
+    #corner { position:absolute; right:28px; bottom:24px; font-size:13px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; opacity:.55; text-shadow:0 2px 8px #000; }
+
+    @media (max-width:900px) {
+      #info { left:18px; bottom:20px; max-width:calc(100vw - 36px); }
+      #title { font-size:18px; }
+      #meta { font-size:12px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <img id="bg" alt="" />
+    <div id="shade"></div>
+    <div id="playerWrap"><iframe id="clipFrame" allow="autoplay; fullscreen" allowfullscreen></iframe></div>
+
+    <div id="info">
+      <div id="title"></div>
+      <div id="meta"></div>
+    </div>
+
+    <div id="progress"><div id="bar"></div></div>
+    <div id="corner"></div>
+
+    <div id="controls">
+      <button class="btn" id="rerollBtn" title="Tire une nouvelle sélection aléatoire de clips">↻ REROLL 100</button>
+      <button class="btn" id="nextBtn" title="Passe immédiatement au clip suivant">▶ SUIVANT</button>
+    </div>
+
+    <div id="status">
+      <div id="statusCard">
+        <div id="statusTitle">Chargement des clips…</div>
+        <div id="statusText">Préparation de la sélection aléatoire.</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  'use strict';
+
+  const qs = new URLSearchParams(location.search);
+  const CHANNEL = (qs.get('channel') || '').replace(/^@/, '').trim();
+  const COUNT = Math.min(100, Math.max(1, Number(qs.get('count') || 100)));
+  const SHOW_INFO = (qs.get('info') ?? '1') !== '0';
+  const MUTED = (qs.get('muted') ?? '0') === '1';
+  const API = 'https://twitchapi.teklynk.com/getuserclips.php';
+
+  const els = {
+    frame: document.getElementById('clipFrame'),
+    bg: document.getElementById('bg'),
+    info: document.getElementById('info'),
+    title: document.getElementById('title'),
+    meta: document.getElementById('meta'),
+    bar: document.getElementById('bar'),
+    corner: document.getElementById('corner'),
+    status: document.getElementById('status'),
+    statusTitle: document.getElementById('statusTitle'),
+    statusText: document.getElementById('statusText'),
+    reroll: document.getElementById('rerollBtn'),
+    next: document.getElementById('nextBtn')
+  };
+
+  let selection = [];
+  let order = [];
+  let pos = 0;
+  let playTimer = null;
+  let progressTimer = null;
+  let clipStartedAt = 0;
+  let clipDurationMs = 0;
+  let rerolling = false;
+
+  function status(title, text, hide = false) {
+    els.statusTitle.textContent = title;
+    els.statusText.textContent = text || '';
+    els.status.classList.toggle('hidden', hide);
+  }
+
+  function shuffle(arr) {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  function escapeText(v) { return String(v ?? '').replace(/[<>]/g, ''); }
+
+  function clearPlaybackTimers() {
+    if (playTimer) clearTimeout(playTimer);
+    if (progressTimer) clearInterval(progressTimer);
+    playTimer = null;
+    progressTimer = null;
+    els.bar.style.width = '0%';
+  }
+
+  function normalizeData(json) {
+    if (!json) return [];
+    if (Array.isArray(json)) return json;
+    if (Array.isArray(json.data)) return json.data;
+    if (json.data && typeof json.data === 'object') return [json.data];
+    if (json.id) return [json];
+    return [];
+  }
+
+  async function fetchSelection() {
+    const p = new URLSearchParams({
+      channel: CHANNEL,
+      random: 'true',
+      count: String(COUNT),
+      _: String(Date.now())
+    });
+
+    let r = await fetch(`${API}?${p.toString()}`, { cache: 'no-store' });
+    if (!r.ok) throw new Error(`API HTTP ${r.status}`);
+    let data = normalizeData(await r.json()).filter(c => c && c.id);
+
+    // Fallback: some gateway builds may ignore count with random=true.
+    if (data.length < Math.min(3, COUNT)) {
+      const f = new URLSearchParams({ channel: CHANNEL, limit: String(COUNT), shuffle: 'true', _: String(Date.now()) });
+      r = await fetch(`${API}?${f.toString()}`, { cache: 'no-store' });
+      if (!r.ok) throw new Error(`API HTTP ${r.status}`);
+      data = normalizeData(await r.json()).filter(c => c && c.id);
+    }
+
+    // Deduplicate just in case.
+    const seen = new Set();
+    return data.filter(c => !seen.has(c.id) && seen.add(c.id)).slice(0, COUNT);
+  }
+
+  async function rerollSelection() {
+    if (rerolling) return;
+    rerolling = true;
+    clearPlaybackTimers();
+    els.reroll.disabled = true;
+    els.next.disabled = true;
+    els.frame.classList.remove('ready');
+    els.info.classList.remove('show');
+    status('Reroll des clips…', `Nouvelle sélection aléatoire de ${COUNT} clips pour ${CHANNEL || 'la chaîne'}.`);
+
+    try {
+      const clips = await fetchSelection();
+      if (!clips.length) throw new Error('Aucun clip reçu pour cette chaîne.');
+      selection = clips;
+      order = shuffle(selection);
+      pos = 0;
+      els.corner.textContent = `${order.length} CLIPS • ${CHANNEL.toUpperCase()}`;
+      status(`${order.length} clips chargés`, 'Lecture automatique…');
+      setTimeout(() => status('', '', true), 500);
+      playCurrent();
+    } catch (err) {
+      console.error(err);
+      status('Impossible de charger les clips', `${err.message}\n\nVérifie le pseudo Twitch dans l’URL et recharge la source.`);
+    } finally {
+      rerolling = false;
+      els.reroll.disabled = false;
+      els.next.disabled = false;
+    }
+  }
+
+  function buildEmbedUrl(clip) {
+    const parent = location.hostname || 'localhost';
+    const u = new URL('https://clips.twitch.tv/embed');
+    u.searchParams.set('clip', clip.id);
+    u.searchParams.set('parent', parent);
+    u.searchParams.set('autoplay', 'true');
+    u.searchParams.set('muted', MUTED ? 'true' : 'false');
+    return u.toString();
+  }
+
+  function playCurrent() {
+    clearPlaybackTimers();
+    if (!order.length) return;
+
+    if (pos >= order.length) {
+      // Same 100 clips keep looping, but in a fresh order.
+      order = shuffle(selection);
+      pos = 0;
+    }
+
+    const clip = order[pos];
+    const dur = Number(clip.duration || 30);
+    // Small load allowance before advancing.
+    clipDurationMs = Math.max(5000, Math.round(dur * 1000) + 1800);
+    clipStartedAt = Date.now();
+
+    els.frame.classList.remove('ready');
+    els.frame.src = buildEmbedUrl(clip);
+
+    const thumb = clip.thumbnail_url || '';
+    if (thumb) {
+      els.bg.style.opacity = '0';
+      els.bg.src = thumb;
+      els.bg.onload = () => { els.bg.style.opacity = '1'; };
+    }
+
+    els.title.textContent = escapeText(clip.title || 'Clip Twitch');
+    const date = clip.created_at ? new Date(clip.created_at).toLocaleDateString('fr-FR') : '';
+    const views = Number.isFinite(Number(clip.view_count)) ? `${Number(clip.view_count).toLocaleString('fr-FR')} vues` : '';
+    els.meta.textContent = [
+      `${pos + 1}/${order.length}`,
+      date,
+      views,
+      clip.creator_name ? `clip par ${clip.creator_name}` : ''
+    ].filter(Boolean).join(' • ');
+
+    if (SHOW_INFO) {
+      setTimeout(() => els.info.classList.add('show'), 350);
+      setTimeout(() => els.info.classList.remove('show'), 6500);
+    }
+
+    els.frame.onload = () => els.frame.classList.add('ready');
+
+    progressTimer = setInterval(() => {
+      const p = Math.min(1, (Date.now() - clipStartedAt) / clipDurationMs);
+      els.bar.style.width = `${(p * 100).toFixed(2)}%`;
+    }, 120);
+
+    playTimer = setTimeout(nextClip, clipDurationMs);
+  }
+
+  function nextClip() {
+    pos++;
+    playCurrent();
+  }
+
+  els.reroll.addEventListener('click', rerollSelection);
+  els.next.addEventListener('click', nextClip);
+  window.addEventListener('keydown', (e) => {
+    if (e.key.toLowerCase() === 'r') rerollSelection();
+    if (e.key.toLowerCase() === 'n' || e.key === 'ArrowRight') nextClip();
+  });
+
+  if (!CHANNEL) {
+    status('Pseudo Twitch manquant', 'Ajoute ?channel=TON_PSEUDO à la fin de l’URL. Exemple : ?channel=Zartoque');
+    els.reroll.disabled = true;
+    els.next.disabled = true;
+    return;
+  }
+
+  rerollSelection();
+})();
+</script>
+</body>
+</html>
