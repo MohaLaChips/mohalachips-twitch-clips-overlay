@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MohaLaChips Twitch Clips Overlay V2.1</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      width:100%;
+      height:100%;
+      margin:0;
+      overflow:hidden;
+      background:#000;
+      font-family:Arial,Helvetica,sans-serif;
+    }
+
+    #player {
+      position:fixed;
+      inset:0;
+      width:100%;
+      height:100%;
+      border:0;
+      background:#000;
+    }
+
+    #pauseScreen {
+      position:fixed;
+      inset:0;
+      z-index:15;
+      display:none;
+      align-items:center;
+      justify-content:center;
+      flex-direction:column;
+      gap:14px;
+      background:rgba(0,0,0,.92);
+      color:#fff;
+      text-align:center;
+    }
+
+    #pauseScreen.visible { display:flex; }
+
+    #pauseTitle {
+      font-size:54px;
+      font-weight:900;
+      letter-spacing:.08em;
+    }
+
+    #pauseSub {
+      font-size:18px;
+      opacity:.7;
+    }
+
+    #controls {
+      position:fixed;
+      top:18px;
+      right:18px;
+      z-index:30;
+      display:flex;
+      gap:8px;
+      opacity:0;
+      transition:opacity .2s ease;
+    }
+
+    body:hover #controls,
+    #controls:focus-within {
+      opacity:1;
+    }
+
+    button {
+      min-height:44px;
+      border:1px solid rgba(255,255,255,.25);
+      border-radius:12px;
+      padding:11px 15px;
+      background:rgba(8,8,12,.82);
+      color:#fff;
+      font-size:14px;
+      font-weight:800;
+      cursor:pointer;
+      backdrop-filter:blur(10px);
+    }
+
+    button:hover { background:rgba(35,35,45,.95); }
+    button:focus { outline:2px solid #fff; outline-offset:2px; }
+
+    #togglePause.isPaused {
+      background:rgba(25,90,45,.88);
+    }
+
+    #badge {
+      position:fixed;
+      left:18px;
+      top:18px;
+      z-index:30;
+      padding:8px 12px;
+      border-radius:10px;
+      background:rgba(8,8,12,.65);
+      color:#fff;
+      font-size:12px;
+      font-weight:700;
+      letter-spacing:.08em;
+      opacity:0;
+      transition:opacity .2s ease;
+      pointer-events:none;
+    }
+
+    body:hover #badge { opacity:.75; }
+  </style>
+</head>
+<body>
+  <iframe id="player" allow="autoplay; fullscreen" allowfullscreen></iframe>
+
+  <div id="pauseScreen" aria-live="polite">
+    <div id="pauseTitle">PAUSE</div>
+    <div id="pauseSub">Les clips sont arrêtés</div>
+  </div>
+
+  <div id="badge"></div>
+
+  <div id="controls">
+    <button id="togglePause" type="button">⏸ PAUSE</button>
+    <button id="reroll" type="button">↻ REROLL 100 CLIPS</button>
+  </div>
+
+  <script>
+    (() => {
+      'use strict';
+
+      const qs = new URLSearchParams(location.search);
+      const channel = (qs.get('channel') || 'mohalachips').replace(/^@/, '').trim();
+      const limit = Math.min(100, Math.max(1, Number(qs.get('count') || 100)));
+
+      const player = document.getElementById('player');
+      const badge = document.getElementById('badge');
+      const reroll = document.getElementById('reroll');
+      const togglePause = document.getElementById('togglePause');
+      const pauseScreen = document.getElementById('pauseScreen');
+
+      let paused = false;
+      let currentPlayerUrl = '';
+
+      badge.textContent = `${channel.toUpperCase()} • ${limit} CLIPS`;
+
+      function buildPlayerUrl() {
+        const p = new URLSearchParams({
+          channel,
+          limit: String(limit),
+          dateRange: '0',
+          videoSize: '1920x1080',
+          themeOption: '0',
+          preferFeatured: 'false',
+          showText: 'false',
+          progressBar: 'true',
+          profileBadge: 'false',
+          showDetails: 'false',
+          detailsText: '',
+          mainAccount: channel,
+          command: '',
+          customText: '',
+          showFollowing: 'false',
+          delay: '0',
+          cache: 'false',
+          ref: '',
+          _reroll: String(Date.now())
+        });
+
+        return `https://twitchclipsplayer.com/clips.html?${p.toString()}`;
+      }
+
+      function loadPlayer(url) {
+        currentPlayerUrl = url;
+        player.src = url;
+      }
+
+      function setPausedState(value) {
+        paused = value;
+
+        if (paused) {
+          /*
+            Cross-origin iframe: the parent page cannot legally call the
+            internal <video>.pause(). Unloading the iframe is the reliable
+            way to stop both video and audio in OBS.
+          */
+          if (player.src && player.src !== 'about:blank') {
+            currentPlayerUrl = player.src;
+          }
+
+          player.src = 'about:blank';
+          player.style.visibility = 'hidden';
+          pauseScreen.classList.add('visible');
+
+          togglePause.textContent = '▶ REPRENDRE';
+          togglePause.classList.add('isPaused');
+          togglePause.setAttribute('aria-pressed', 'true');
+        } else {
+          pauseScreen.classList.remove('visible');
+          player.style.visibility = 'visible';
+
+          togglePause.textContent = '⏸ PAUSE';
+          togglePause.classList.remove('isPaused');
+          togglePause.setAttribute('aria-pressed', 'false');
+
+          if (!currentPlayerUrl) {
+            currentPlayerUrl = buildPlayerUrl();
+          }
+
+          player.src = currentPlayerUrl;
+        }
+      }
+
+      function togglePlayback() {
+        setPausedState(!paused);
+      }
+
+      function rerollClips() {
+        paused = false;
+        pauseScreen.classList.remove('visible');
+        player.style.visibility = 'visible';
+
+        togglePause.textContent = '⏸ PAUSE';
+        togglePause.classList.remove('isPaused');
+        togglePause.setAttribute('aria-pressed', 'false');
+
+        player.src = 'about:blank';
+
+        setTimeout(() => {
+          loadPlayer(buildPlayerUrl());
+        }, 120);
+      }
+
+      togglePause.addEventListener('click', togglePlayback);
+      reroll.addEventListener('click', rerollClips);
+
+      window.addEventListener('keydown', (e) => {
+        const key = e.key.toLowerCase();
+
+        if (key === 'p' || e.code === 'Space') {
+          e.preventDefault();
+          togglePlayback();
+        }
+
+        if (key === 'r') {
+          e.preventDefault();
+          rerollClips();
+        }
+      });
+
+      loadPlayer(buildPlayerUrl());
+    })();
+  </script>
+</body>
+</html>
